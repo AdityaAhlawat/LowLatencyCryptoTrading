@@ -4,11 +4,9 @@ from datetime import datetime, timedelta, timezone
 import time
 import re
 import os
+import numpy as np
 
 def parse_lookback(lookback_str):
-    """
-    Parses strings like '1y 2mo 5d 3h 20m' into a timedelta object
-    """
     units = {
         'y': 365 * 24 * 60,
         'mo': 30 * 24 * 60,
@@ -31,7 +29,7 @@ def parse_lookback(lookback_str):
 
     return timedelta(minutes=total_minutes)
 
-def get_historical_klines(symbol="BTCUSDT", interval="1m", lookback="2h", save_path=None):
+def get_historical_klines(symbol="BTCUSDT", interval="1m", lookback="2h", save_path="auto"):
     url = "https://api.binance.us/api/v3/klines"
     interval_minutes = int(interval[:-1]) if interval.endswith("m") else 1
     lookback_duration = parse_lookback(lookback)
@@ -46,7 +44,6 @@ def get_historical_klines(symbol="BTCUSDT", interval="1m", lookback="2h", save_p
             batch_end = end_time
 
         print(f"Requesting from {start_time} to {batch_end}... ", end="")
-
         params = {
             "symbol": symbol,
             "interval": interval,
@@ -59,13 +56,13 @@ def get_historical_klines(symbol="BTCUSDT", interval="1m", lookback="2h", save_p
         data = response.json()
 
         if not isinstance(data, list):
-            print("❌ API Error:", data)
+            print("API Error:", data)
             break
 
         print(f"Received {len(data)} rows")
 
         if not data:
-            print("⚠️ No rows returned, stopping.")
+            print("No rows returned, stopping.")
             break
 
         df = pd.DataFrame(data, columns=[
@@ -73,27 +70,43 @@ def get_historical_klines(symbol="BTCUSDT", interval="1m", lookback="2h", save_p
             "close_time", "quote_asset_volume", "num_trades",
             "taker_buy_base_vol", "taker_buy_quote_vol", "ignore"
         ])
-        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-        df["close_time"] = pd.to_datetime(df["close_time"], unit="ms")
-        df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
-        df = df[["open_time", "open", "high", "low", "close", "volume"]]
+
+        # Convert timestamps to UNIX float seconds (precision-safe)
+        df["open_time"] = df["open_time"].apply(lambda ms: round(ms / 1000, 6))
+        df["close_time"] = df["close_time"].apply(lambda ms: round(ms / 1000, 6))
+
+        # Convert numeric columns with precision
+        float_cols = ["open", "high", "low", "close", "volume", "quote_asset_volume",
+                      "taker_buy_base_vol", "taker_buy_quote_vol"]
+        for col in float_cols:
+            df[col] = df[col].apply(lambda x: float(str(x)))  # preserve scientific notation
+
+        # Convert num_trades to int
+        df["num_trades"] = df["num_trades"].astype(int)
+
+        # Drop unused column
+        df.drop(columns=["ignore"], inplace=True)
+
+        # Optional: Replace suspicious 0.0s with NaN
+        for col in ["volume", "taker_buy_base_vol", "taker_buy_quote_vol"]:
+            df[col] = df[col].replace(0.0, np.nan)
 
         df_all = pd.concat([df_all, df], ignore_index=True)
-
         start_time = batch_end
         time.sleep(0.25)
 
-    if not df_all.empty and save_path:
-        df_all.to_csv(save_path, index=False)
-        print(f"✅ Saved training data to {save_path}")
+    # Save final result
+    if not df_all.empty:
+        if save_path == "auto":
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            save_path = os.path.join(base_dir, "data", "trainingData.csv")
+
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            df_all.to_csv(save_path, index=False)
+            print(f"✅ Saved training data to {save_path}")
 
     return df_all
 
 if __name__ == "__main__":
-    # Set path to: ../data/trainingData.csv
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # root project directory
-    output_path = os.path.join(base_dir, "data", "trainingData.csv")
-
-    df = get_historical_klines(symbol="BTCUSDT", interval="1m", lookback="1y 2mo 2m", save_path=output_path)
-    if df.empty:
-        print("⚠️ No data was returned from the API.")
+    get_historical_klines(symbol="BTCUSDT", interval="1m", lookback="2h")
